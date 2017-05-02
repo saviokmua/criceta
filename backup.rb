@@ -2,88 +2,94 @@ class Backup
   require 'rubygems'
   require 'net/ssh'
   require 'date'
+  require 'colorize'
+  def initialize params
+    set params
+  end
+
   def set params
-   @params = params
- end
-
- def exec_ssh cmd
-   begin
-    puts "ssh_cmd: #{cmd}"
-    ssh = Net::SSH.start(@params[:server][:ssh_host], @params[:server][:ssh_user], :password => @params[:server][:ssh_password])
-    res = ssh.exec!(cmd)
-    ssh.close
-    puts "ssh_rezult: #{res}"
-  rescue
-   puts "Unable to connect to #{@params[:server][:ssh_host]} using #{@params[:server][:ssh_user]}/#{@params[:server][:ssh_password]}"
- end
-end
-
-
-def exec
-  exec_ssh "mkdir #{@params[:server][:tmp_dir]}"
-
-  #backup folders
-  @params[:backup][:objects][:folders].each do |folder|
-    backup_folder folder
+    @params = params
   end
 
-  # backup database
-  @params[:backup][:objects][:databases].each do |db|
-    backup_mysql db
+
+  def exec
+    #step 1) create tmp dir
+    exec_ssh "mkdir #{@params[:server][:tmp_dir]}" if @params[:server][:tmp_dir].
+
+    #step 2) backup folders
+    @params[:backup][:objects][:folders].each do |folder|
+      backup_folder folder
+    end
+
+    #step 3) backup database
+    @params[:backup][:objects][:databases].each do |db|
+      backup_mysql db
+    end
+
+    #step 4) remove tmp dir
+    exec_ssh "rm -r #{@params[:server][:tmp_dir]}"
+
+    #step 5) Execute rotate backups
+    #rotate_backups
   end
 
-  exec_ssh "rm -r #{@params[:server][:tmp_dir]}"
-  
-  rotate_backups
-end
-
-def exec2
-  unless @params[:backup][:rotates].nil?
-    @params[:backup][:rotates].each do |rotate_path|
-      rotate rotate_path
+  def exec2
+    unless @params[:backup][:rotates].nil?
+      @params[:backup][:rotates].each do |rotate_path|
+        rotate rotate_path
+      end
     end
   end
-end
 
-
-
-def get_folder_name name
-  name.gsub '/', '_'
-  #name.split('/').last
-end
-
-
-def backup_folder folder
-  file = "#{@params[:server][:tmp_dir]}/#{get_folder_name(folder)}.tar.gz"
-  cmd = "sudo -s tar czvf #{file} #{folder}"
-  exec_ssh cmd  
-  ftp_upload @params[:backup][:folder], file
-
-end
-
-def backup_mysql db
-  if db[:type] == 'mysql'
-    file = "#{@params[:server][:tmp_dir]}/dump_#{db[:name]}.sql.gz"
-    #cmd = "/usr/local/bin/mysqldump -u #{db[:user]} -p#{db[:password]} -f --default-character-set=utf8 --databases #{db[:name]} -i --hex-blob --quick > #{@params[:server][:tmp_dir]}/#{db[:name]}.sql"
-    cmd = "sudo -s /usr/local/bin/mysqldump -u #{db[:user]} -p#{db[:password]} -f --default-character-set=utf8 --databases #{db[:name]} -i --hex-blob --quick  | gzip -c > #{file}"
-    exec_ssh cmd    
-    ftp_upload @params[:backup][:folder], file
+  def backup_folder folder
+    if @params[:backup][:to_folder]
+      file = "#{@params[:server][:tmp_dir]}/#{get_folder_name(folder)}.tar.gz"
+      cmd = "sudo -s tar czvf #{file} #{folder}"
+      exec_ssh cmd  
+      file_upload_to_ftp @params[:backup][:folder], file
+    else
+      file = "#{get_folder_name(folder)}.tar.gz"
+      @params[:backup][:ftp].each do |ftp|
+        cmd = "ncftp ftp://#{ftp[:user]}:#{ftp[:password]}@#{ftp[:host]}/<<EOF
+        mkdir #{@params[:backup][:folder]}
+        EOF
+        "
+        exec_ssh cmd
+        cmd = "sudo -s tar -czvf - #{folder} | ncftpput -u #{ftp[:user]} -p #{ftp[:password]} -c #{ftp[:host]} #{@params[:backup][:folder]}/#{file}"
+        exec_ssh cmd
+      end
+    end
   end
-end
 
-def ftp_upload to_folder, file
-  @params[:backup][:ftps].each do |ftp|
-    cmd = "/usr/local/bin/lftp -u #{ftp[:user]},\"#{ftp[:password]}\" -e \"mkdir #{to_folder}; mput -O /#{to_folder}/ #{file};exit\" #{ftp[:host]}"
-    exec_ssh cmd
-    cmd = "rm #{file}"
-    exec_ssh cmd
-
+  def backup_mysql db
+    if db[:type] == 'mysql'
+      file = "#{@params[:server][:tmp_dir]}/dump_#{db[:name]}.sql.gz"
+      #cmd = "/usr/local/bin/mysqldump -u #{db[:user]} -p#{db[:password]} -f --default-character-set=utf8 --databases #{db[:name]} -i --hex-blob --quick > #{@params[:server][:tmp_dir]}/#{db[:name]}.sql"
+      if @params[:backup][:to_folder]
+        cmd = "sudo -s /usr/local/bin/mysqldump -u #{db[:user]} -p#{db[:password]} -f --default-character-set=utf8 --databases #{db[:name]} -i --hex-blob --quick  | gzip -c > #{file}"
+        file_upload_to_ftp @params[:backup][:folder], file
+        exec_ssh cmd    
+      else
+        @params[:backup][:ftp].each do |ftp|
+          cmd = "sudo -s /usr/local/bin/mysqldump -u #{db[:user]} -p#{db[:password]} -f --default-character-set=utf8 --databases #{db[:name]} -i --hex-blob --quick  | ncftpput -u #{ftp[:user]} -p #{ftp[:password]} -c #{ftp[:host]} #{@params[:backup][:folder]}/#{file}"    
+          exec_ssh cmd    
+        end
+      end
+    end
   end
-end
 
-def rotate path, periods = nil
-  default_periods= 
-  [
+  def file_upload_to_ftp to_folder, file
+    @params[:backup][:ftp].each do |ftp|
+      cmd = "/usr/local/bin/lftp -u #{ftp[:user]},\"#{ftp[:password]}\" -e \"mkdir #{to_folder}; mput -O /#{to_folder}/ #{file};exit\" #{ftp[:host]}"
+      exec_ssh cmd
+      cmd = "rm #{file}"
+      exec_ssh cmd
+    end
+  end
+
+  def rotate path, periods = nil
+    default_periods= 
+    [
     {start:96422400, stop:9642240000000, count:0}, # 
     {start:64281601, stop:96422400, count:1}, # рік 3
     {start:32140801, stop:64281600, count:1}, # рік 2
@@ -102,25 +108,23 @@ def rotate path, periods = nil
     {start:1209601, stop:1814400, count:1}, # третій тиждень
     {start:604801, stop:1209600, count:1}, # другий тиждень
     {start:172801, stop:604800, count:5}, # 2..7 днів
-    {start:0, stop:172800, count:12} # 1..2 днів
-  ]
+    {start:0, stop:172800, count:12}] # 1..2 днів
 
-  periods ||= default_periods
 
-  periods.each do |period|
-    puts "period: #{period}"
-    puts "- path:#{path}"
-    objects = get_objects path, period
-    puts "objects:#{objects}"
-    remove_objects objects, path, period
-    puts objects
-    puts "_____________________________________"
+    periods ||= default_periods
+
+    periods.each do |period|
+      puts "period: #{period}"
+      puts "- path:#{path}"
+      objects = get_objects path, period
+      puts "objects:#{objects}"
+      remove_objects objects, path, period
+      puts objects
+      puts "_____________________________________"
+    end
   end
 
-
-end
-
-def test path
+  def test path
   #date = Date.strptime(date, '%Y-%m-%d')
   (1..9600).each do |minute|
     folder=(Time.new(2016, 8, 20 , 13, 30, 1)-(minute*3600)).strftime("%Y-%m-%d_%H-%M-%S")
@@ -135,6 +139,10 @@ def test path
 
 
   private
+
+  def get_folder_name name
+    name.gsub '/', '_'
+  end
 
   # повертає hash об'єктів (директорій або файлів) в path, які належать до періоду period, де
   # key - к-ть секунд від дати now_date
@@ -189,28 +197,28 @@ def test path
 
       (0..remove_count-1).each do |i| 
         puts "*) --------"
-puts "*) index: #{i}"
-puts "*) ===> remove_object: #{objects[i]}"
-puts "*) --------"
-remove_object(objects[i], path) 
-end
+        puts "*) index: #{i}"
+        puts "*) ===> remove_object: #{objects[i]}"
+        puts "*) --------"
+        remove_object(objects[i], path) 
+      end
 
-puts "****------END----------"
-else
-  puts "No deleted"
-  puts "objects_count:#{objects_count}"
-  puts "period: #{period}"
-end
-end
+      puts "****------END----------"
+    else
+      puts "No deleted"
+      puts "objects_count:#{objects_count}"
+      puts "period: #{period}"
+    end
+  end
 
-def remove_object object, path
-  cmd = "rm -r #{path}/#{object}"
-  puts cmd
-  system(cmd)
+  def remove_object object, path
+    cmd = "rm -r #{path}/#{object}"
+    puts cmd
+    system(cmd)
 
-end
+  end
 
-def set_params params
+  def set_params params
     #set_params = params.permit(:title )
   end
 
@@ -221,6 +229,30 @@ def set_params params
       end
     end
   end
+
+  def log str, color=''
+    color = "black" if color.empty?
+    puts str.colorize(color)
+  end
+
+  def exec_ssh cmd
+    log "ssh(cmd): #{cmd}","green"
+    if @params[:server][:keys] == false
+      ssh = Net::SSH.start(@params[:server][:ssh_host], @params[:server][:ssh_user], password: @params[:server][:ssh_password])
+    rescue
+      puts "Unable to connect to #{@params[:server][:ssh_host]} using #{@params[:server][:ssh_user]}/#{@params[:server][:ssh_password]}"
+    end
+  else
+    begin
+      ssh = Net::SSH.start(@params[:server][:ssh_host],@params[:server][:ssh_user])
+    rescue
+      puts "Unable to connect to #{@params[:server][:ssh_host]} using #{@params[:server][:ssh_user]}/#{@params[:server][:ssh_password]}"
+    end
+  end  
+  res = ssh.exec!(cmd)
+  ssh.close
+  log "ssh(rezult): #{res}"
+end
 
 
 end

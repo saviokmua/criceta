@@ -1,48 +1,39 @@
-require "/home/savio/scripts/backup.rb"
+require "/home/savio/www/criceta/backup.rb"
+
+ftps = []
+ftps << {host: "backup.host", user: "test1", password: "1test"}
+
+databases = []
+#databases << {type: "mysql", host: "localhost", user: "user", password: "password", name: "dbname"}
+
+folders = []
+folders << '/home/savio/www/agape'
 
 folder = Time.new.strftime(Time.new.strftime('%Y-%m-%d_%H-%M-%S'))
 params = { 
 	backup: {
 		to_folder: false,
 		folder: folder,
-		ftps: [{
-			host: "host",
-			user: "login",
-			password: "password"
-			}
-			],
+		ftp: ftps,
+		objects: { folders: folders, databases: databases },
+		rotates:["/mnt/backup2/projects/billing2"],
+		},
 
-			objects: {
-				folders: [
-					"/usr/local/billing2_vpn",
-					"/usr/local/www/billing2a",
-					"/var/cron",
-					"/etc/crontab"
-					],
-					databases: [
-						{type: "mysql",
-							host: "localhost",
-							user: "user",
-							password: "password",
-							name: "dbname"
-							}
-							]
-						},
-						rotates:["/mnt/backup2/projects/billing2"]
-						},
+		server: {
+			os: 'linux',
+			key: true,
+			ssh_host: "localhost",
+			ssh_user: "savio",
+			ssh_password: "",
+			tmp_dir: "/tmp/#{folder}"
+		},
+		commands: {
+			'linux' => {'ncftpput' => '/usr/bin/ncftpput'},
+			'freebsd' => {'ncftpput' => '/usr/local/bin/ncftpput'},
+		}
+		
+	} 	
 
-						server: {
-							ssh_host: "host",
-							ssh_user: "user",
-							ssh_password: "password",
-							tmp_dir: "/tmp/#{folder}"
-
-						}
-
-					} 	
-
-
-
-					backup = Backup.new
-					backup.set(params)
-					puts backup.exec
+	backup = Backup.new(params)
+	#backup.set(params)
+	puts backup.exec
