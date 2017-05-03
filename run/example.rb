@@ -1,10 +1,12 @@
 require "/home/savio/www/criceta/backup.rb"
 
 ftps = []
-ftps << {host: "backup.host", user: "test1", password: "1test"}
+ftps << {host: "host", user: "user", password: "password"}
 
 databases = []
-#databases << {type: "mysql", host: "localhost", user: "user", password: "password", name: "dbname"}
+databases << {type: "mysql", host: "localhost", user: "username", password: "password", name: "name"}
+databases << {type: "postgresql", host: "localhost", user: "username", password: "password", name: "name"}
+
 
 folders = []
 folders << '/home/savio/www/agape'
@@ -27,11 +29,6 @@ params = {
 			ssh_password: "",
 			tmp_dir: "/tmp/#{folder}"
 		},
-		commands: {
-			'linux' => {'ncftpput' => '/usr/bin/ncftpput'},
-			'freebsd' => {'ncftpput' => '/usr/local/bin/ncftpput'},
-		}
-		
 	} 	
 
 	backup = Backup.new(params)

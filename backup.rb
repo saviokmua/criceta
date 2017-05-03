@@ -3,34 +3,43 @@ class Backup
   require 'net/ssh'
   require 'date'
   require 'colorize'
+  require 'colorized_string'
+
   def initialize params
     set params
   end
 
   def set params
+    commands = {
+      'linux'   => {ncftpput: '/usr/bin/ncftpput',        mysqldump: '/usr/bin/mysqldump', pg_dump: '/usr/bin/pg_dump'},
+      'freebsd' => {ncftpput: '/usr/local/bin/ncftpput',  mysqldump: '/usr/local/bin/mysqldump', pg_dump: '/usr/local/bin/pg_dump'}
+    }
+
     @params = params
+    @params[:commands]=commands[@params[:server][:os]]
+
   end
 
 
   def exec
     #step 1) create tmp dir
-    exec_ssh "mkdir #{@params[:server][:tmp_dir]}" if @params[:server][:tmp_dir].
+    exec_ssh "mkdir #{@params[:server][:tmp_dir]}" if @params[:server][:tmp_dir]
 
     #step 2) backup folders
     @params[:backup][:objects][:folders].each do |folder|
       backup_folder folder
     end
 
-    #step 3) backup database
+    #step 3) backup database 
     @params[:backup][:objects][:databases].each do |db|
-      backup_mysql db
+      backup_db db
     end
 
     #step 4) remove tmp dir
     exec_ssh "rm -r #{@params[:server][:tmp_dir]}"
 
     #step 5) Execute rotate backups
-    #rotate_backups
+    rotate_backups
   end
 
   def exec2
@@ -50,36 +59,60 @@ class Backup
     else
       file = "#{get_folder_name(folder)}.tar.gz"
       @params[:backup][:ftp].each do |ftp|
-        cmd = "ncftp ftp://#{ftp[:user]}:#{ftp[:password]}@#{ftp[:host]}/<<EOF
-        mkdir #{@params[:backup][:folder]}
-        EOF
-        "
-        exec_ssh cmd
+        create_backup_folder ftp
         cmd = "sudo -s tar -czvf - #{folder} | ncftpput -u #{ftp[:user]} -p #{ftp[:password]} -c #{ftp[:host]} #{@params[:backup][:folder]}/#{file}"
         exec_ssh cmd
       end
     end
   end
 
+  def backup_db db
+    backup_mysql db if db[:type] == 'mysql'
+    backup_postgres db if db[:type] == 'postgresql'
+  end
+
+
   def backup_mysql db
     if db[:type] == 'mysql'
-      file = "#{@params[:server][:tmp_dir]}/dump_#{db[:name]}.sql.gz"
-      #cmd = "/usr/local/bin/mysqldump -u #{db[:user]} -p#{db[:password]} -f --default-character-set=utf8 --databases #{db[:name]} -i --hex-blob --quick > #{@params[:server][:tmp_dir]}/#{db[:name]}.sql"
       if @params[:backup][:to_folder]
-        cmd = "sudo -s /usr/local/bin/mysqldump -u #{db[:user]} -p#{db[:password]} -f --default-character-set=utf8 --databases #{db[:name]} -i --hex-blob --quick  | gzip -c > #{file}"
+        file = "#{@params[:server][:tmp_dir]}/dump_#{db[:name]}.sql.gz"
+        cmd = "sudo -s #{@params[:commands][:mysqldump]} -u #{db[:user]} -p#{db[:password]} -f --default-character-set=utf8 --databases #{db[:name]} -i --hex-blob --quick  | gzip -c > #{file}"
         file_upload_to_ftp @params[:backup][:folder], file
         exec_ssh cmd    
       else
+        file = "dump_#{db[:name]}.sql.gz"
         @params[:backup][:ftp].each do |ftp|
-          cmd = "sudo -s /usr/local/bin/mysqldump -u #{db[:user]} -p#{db[:password]} -f --default-character-set=utf8 --databases #{db[:name]} -i --hex-blob --quick  | ncftpput -u #{ftp[:user]} -p #{ftp[:password]} -c #{ftp[:host]} #{@params[:backup][:folder]}/#{file}"    
+          create_backup_folder ftp
+          cmd = "sudo -s #{@params[:commands][:mysqldump]} --user=#{db[:user]} --password=#{db[:password]} -f --default-character-set=utf8 --databases #{db[:name]} -i --hex-blob --quick  | gzip -9 | ncftpput -u #{ftp[:user]} -p #{ftp[:password]} -c #{ftp[:host]} #{@params[:backup][:folder]}/#{file}"    
           exec_ssh cmd    
         end
       end
     end
   end
 
+  def backup_postgres db
+    if db[:type] == 'postgresql'
+      if @params[:backup][:to_folder]
+        file = "#{@params[:server][:tmp_dir]}/dump_#{db[:name]}.sql.gz"
+        cmd = "#{@params[:commands][:pg_dump]} postgresql://#{db[:user]}:#{db[:password]}@#{db[:host]}:5432/#{db[:name]} | gzip -c > #{file}"
+        file_upload_to_ftp @params[:backup][:folder], file
+        exec_ssh cmd    
+      else
+        file = "dump_postgres_#{db[:name]}.sql.gz"
+        @params[:backup][:ftp].each do |ftp|
+          create_backup_folder ftp
+          cmd = "#{@params[:commands][:pg_dump]} postgresql://#{db[:user]}:#{db[:password]}@127.0.0.1:5432/#{db[:name]} | gzip -9 | ncftpput -u #{ftp[:user]} -p #{ftp[:password]} -c #{ftp[:host]} #{@params[:backup][:folder]}/#{file}"    
+          exec_ssh cmd    
+        end
+      end
+    end
+  end
+
+
+
   def file_upload_to_ftp to_folder, file
     @params[:backup][:ftp].each do |ftp|
+      create_backup_folder ftp
       cmd = "/usr/local/bin/lftp -u #{ftp[:user]},\"#{ftp[:password]}\" -e \"mkdir #{to_folder}; mput -O /#{to_folder}/ #{file};exit\" #{ftp[:host]}"
       exec_ssh cmd
       cmd = "rm #{file}"
@@ -232,27 +265,36 @@ class Backup
 
   def log str, color=''
     color = "black" if color.empty?
-    puts str.colorize(color)
+    puts str
   end
 
   def exec_ssh cmd
     log "ssh(cmd): #{cmd}","green"
     if @params[:server][:keys] == false
-      ssh = Net::SSH.start(@params[:server][:ssh_host], @params[:server][:ssh_user], password: @params[:server][:ssh_password])
-    rescue
-      puts "Unable to connect to #{@params[:server][:ssh_host]} using #{@params[:server][:ssh_user]}/#{@params[:server][:ssh_password]}"
-    end
-  else
-    begin
-      ssh = Net::SSH.start(@params[:server][:ssh_host],@params[:server][:ssh_user])
-    rescue
-      puts "Unable to connect to #{@params[:server][:ssh_host]} using #{@params[:server][:ssh_user]}/#{@params[:server][:ssh_password]}"
-    end
-  end  
-  res = ssh.exec!(cmd)
-  ssh.close
-  log "ssh(rezult): #{res}"
-end
+      begin
+        ssh = Net::SSH.start(@params[:server][:ssh_host], @params[:server][:ssh_user], password: @params[:server][:ssh_password])
+      rescue
+        puts "Unable to connect to #{@params[:server][:ssh_host]} using #{@params[:server][:ssh_user]}/#{@params[:server][:ssh_password]}"
+      end
+    else
+      begin
+        ssh = Net::SSH.start(@params[:server][:ssh_host],@params[:server][:ssh_user])
+      rescue
+        puts "Unable to connect to #{@params[:server][:ssh_host]} using #{@params[:server][:ssh_user]}/#{@params[:server][:ssh_password]}"
+      end
+    end  
+    res = ssh.exec!(cmd)
+    ssh.close
+    log "ssh(rezult): #{res}"
+  end
 
+
+  def create_backup_folder ftp
+    cmd = "ncftp ftp://#{ftp[:user]}:#{ftp[:password]}@#{ftp[:host]}/<<EOF
+    mkdir #{@params[:backup][:folder]}
+    EOF
+    "
+    exec_ssh cmd
+  end
 
 end
